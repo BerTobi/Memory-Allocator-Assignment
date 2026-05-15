@@ -1,0 +1,26 @@
+{
+    "map_width": 800,
+    "map_height": 600,
+    "wall_thickness": 5,
+    "player_speed": 250,
+    "walls": [
+        { "x1": 0, "y1": 0, "x2": 800, "y2": 0, "invulnerable": true },
+        { "x1": 200, "y1": 200, "x2": 400, "y2": 200 }
+    ],
+    "bullet_spawners": [
+        {
+            "x": 400,
+            "y": 300,
+            "spawn_frequency": 2.0,
+            "velocity": 200,
+            "bullet_type": "bouncer"
+        },
+        {
+            "x": 700,
+            "y": 500,
+            "spawn_frequency": 5.0,
+            "velocity": 150,
+            "bullet_type": "constructor"
+        }
+    ]
+}
