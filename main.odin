@@ -31,7 +31,7 @@ Bullet :: struct
     position: rl.Vector2,
     velocity: rl.Vector2,
     radius:   f32,
-    type: BulletType
+    type:     BulletType
 }
 
 Wall :: struct
@@ -105,11 +105,6 @@ StateAllocatorFree :: proc(stateAllocator: ^StateAllocator)
     delete(stateAllocator.buffer)
 }
 
-MakeWall :: proc(x1, y1, x2, y2: f32, thickness: f32, invulnerable := false) -> Wall
-{
-    return Wall{ p1 = {x1, y1}, p2 = {x2, y2}, thickness = thickness, invulnerable = invulnerable }
-}
-
 WallClosestPoint :: proc(wall: Wall, center: rl.Vector2) -> (closest: rl.Vector2, dist: f32)
 {
     dx := wall.p2.x - wall.p1.x
@@ -181,25 +176,20 @@ LoadMap :: proc(path: string, stateAllocator: ^StateAllocator) -> ^State
         if s.bullet_type == "constructor" do type = .CONSTRUCTOR
         if s.bullet_type == "bulldozer" do type = .BULLDOZER
 
-        append(&state.spawners, Spawner{
-            position       = {f32(s.x), f32(s.y)},
-            spawnFrequency = s.spawn_frequency,
-            speed          = f32(s.velocity),
-            bulletType     = type,
-        })
+        append(&state.spawners, Spawner{position = {f32(s.x), f32(s.y)}, spawnFrequency = s.spawn_frequency, speed = f32(s.velocity), bulletType = type})
     }
 
     t := f32(config.wall_thickness)
     w := f32(config.map_width)
     h := f32(config.map_height)
 
-    append(&state.walls, MakeWall(  0,   0,  w,  0, t, true))  // top
-    append(&state.walls, MakeWall(  0,   h,  w,  h, t, true))  // bottom
-    append(&state.walls, MakeWall(  0,   0,  0,  h, t, true))  // left
-    append(&state.walls, MakeWall(  w,   0,  w,  h, t, true))  // right
+    append(&state.walls, Wall{ p1 = {0, 0}, p2 = {w, 0}, thickness = t, invulnerable = true }) // top
+    append(&state.walls, Wall{ p1 = {0, h}, p2 = {w, h}, thickness = t, invulnerable = true }) // bottom
+    append(&state.walls, Wall{ p1 = {0, 0}, p2 = {0, h}, thickness = t, invulnerable = true }) // left
+    append(&state.walls, Wall{ p1 = {w, 0}, p2 = {w, h}, thickness = t, invulnerable = true }) // right
 
     for w in config.walls {
-        append(&state.walls, MakeWall(f32(w.x1), f32(w.y1), f32(w.x2), f32(w.y2), t, w.invulnerable))
+        append(&state.walls, Wall{ p1 = {f32(w.x1), f32(w.y1)}, p2 = {f32(w.x2), f32(w.y2)}, thickness = t, invulnerable = w.invulnerable })
     }
 
     return state
@@ -225,10 +215,7 @@ Update :: proc(state : ^State) -> bool
 
     for bullet in state.bullets
     {
-        if rl.CheckCollisionCircles(state.playerPosition, PLAYER_RADIUS, bullet.position, bullet.radius)
-        {
-            return true
-        }
+        if rl.CheckCollisionCircles(state.playerPosition, PLAYER_RADIUS, bullet.position, bullet.radius) do return true
     }
     return false
 }
@@ -249,12 +236,7 @@ UpdateSpawners :: proc(state: ^State)
         length := math.sqrt(dir.x*dir.x + dir.y*dir.y)
         if length == 0 do continue
 
-        append(&state.bullets, Bullet{
-            position = spawner.position,
-            velocity = (dir / length) * spawner.speed,
-            radius   = 5,
-            type = spawner.bulletType,
-        })
+        append(&state.bullets, Bullet{position = spawner.position, velocity = (dir / length) * spawner.speed, radius = 5, type = spawner.bulletType})
     }
 }
 
@@ -270,12 +252,7 @@ SpawnConstructorWall :: proc(state: ^State, impact: rl.Vector2, velocity: rl.Vec
     p1   := rl.Vector2{impact.x - perp_x * half, impact.y - perp_y * half}
     p2   := rl.Vector2{impact.x + perp_x * half, impact.y + perp_y * half}
 
-    append(&state.walls, Wall{
-        p1           = p1,
-        p2           = p2,
-        thickness    = f32(state.wallThickness),
-        invulnerable = false,
-    })
+    append(&state.walls, Wall{p1 = p1, p2 = p2, thickness = f32(state.wallThickness), invulnerable = false})
 }
 
 UpdateBullets :: proc(state: ^State)
