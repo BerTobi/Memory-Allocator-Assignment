@@ -10,10 +10,22 @@ import "core:fmt"
 import "core:strings"
 import "core:path/filepath"
 
-STATE_ARENA_SIZE :: 4 * 1024 * 1024
+Coordinate :: f32
+Speed      :: f32
+Time       :: f32
+Thickness  :: f32
+Radius     :: f32
+Dimension  :: f32
 
-PLAYER_RADIUS :: 8
-CONSTRUCTOR_WALL_LENGTH :: f32(100)
+ScreenCoord :: i32
+FontSize    :: i32
+PixelCount  :: i32
+
+STATE_ARENA_SIZE :: 4 * 1024 * 1024
+MENU_ARENA_SIZE :: 1 * 1024 * 1024
+
+PLAYER_RADIUS  :: Radius(8)
+CONSTRUCTOR_WALL_LENGTH :: f32(100)  
 
 Screen :: enum { MAIN_MENU, IN_GAME, GAME_OVER }
 
@@ -30,36 +42,35 @@ Bullet :: struct
 {
     position: rl.Vector2,
     velocity: rl.Vector2,
-    radius:   f32,
-    type:     BulletType
+    radius:   Radius,
+    type:     BulletType,
 }
 
 Wall :: struct
 {
     p1, p2:      rl.Vector2,
-    thickness:   f32,
+    thickness:   Thickness,
     invulnerable: bool,
 }
 Spawner :: struct
 {
     position:       rl.Vector2,
-    spawnFrequency: f32,
-    speed:          f32,
+    spawnFrequency: Time,
+    speed:          Speed,
     bulletType:     BulletType,
-    timer:          f32,   
+    timer:          Time,
 }
 State :: struct
 {
     playerPosition: rl.Vector2,
     playerVelocity: rl.Vector2,
-    playerSpeed:    f32,
-    wallThickness:  i32,
+    playerSpeed:    Speed,
+    wallThickness:  Thickness,
     bullets:        [dynamic]Bullet,
     walls:          [dynamic]Wall,
     spawners:       [dynamic]Spawner,
-    timeSurvived: f32,
-    mapWidth:  f32,
-    mapHeight: f32,
+    timeSurvived:   Time,
+    mapSize:        [2]Dimension,
 }
 
 StateAllocator :: struct
@@ -69,26 +80,28 @@ StateAllocator :: struct
 }
 
 MapConfig :: struct {
-    player_speed:    i32,
+    player_speed:   i32,
     bullet_spawners: []struct {
         x, y:            i32,
-        spawn_frequency: f32,
-        velocity:        int,
+        spawn_frequency: Time,
+        velocity:        i32,
         bullet_type:     string,
     },
     walls: []struct {
-        x1, y1, x2, y2:            i32,
-        invulnerable:              bool,
+        x1, y1, x2, y2: i32,
+        invulnerable:    bool,
     },
-    map_width:  i32,
-    map_height: i32,
+    map_width:      i32,
+    map_height:     i32,
     wall_thickness: i32,
 }
 
 MenuState :: struct
 {
+    arena:        mem.Arena,
+    buffer:       []byte,
     mapFiles:       [dynamic]string,
-    selected:       i32,
+    selected:       PixelCount,
     dropdownOpen:   bool,
     itemsText:      string,  
 }
@@ -107,17 +120,15 @@ StateAllocatorFree :: proc(stateAllocator: ^StateAllocator)
 
 WallClosestPoint :: proc(wall: Wall, center: rl.Vector2) -> (closest: rl.Vector2, dist: f32)
 {
-    dx := wall.p2.x - wall.p1.x
-    dy := wall.p2.y - wall.p1.y
-    lenSq := dx*dx + dy*dy
+    d := wall.p2 - wall.p1
+    lenSq := d.x*d.x + d.y*d.y
 
     t := f32(0)
-    if lenSq > 0 do t = clamp(((center.x - wall.p1.x)*dx + (center.y - wall.p1.y)*dy) / lenSq, 0, 1)
+    if lenSq > 0 do t = clamp(((center.x - wall.p1.x)*d.x + (center.y - wall.p1.y)*d.y) / lenSq, 0, 1)
 
-    closest = {wall.p1.x + t*dx, wall.p1.y + t*dy}
-    diffX   := center.x - closest.x
-    diffY   := center.y - closest.y
-    dist     = math.sqrt(diffX*diffX + diffY*diffY)
+    closest = {wall.p1.x + t*d.x, wall.p1.y + t*d.y}
+    diff   := center - closest
+    dist     = math.sqrt(diff.x*diff.x + diff.y*diff.y)
     return
 }
 
@@ -127,72 +138,79 @@ ResolveWallCollisions :: proc(state: ^State)
 
     for wall in state.walls
     {
-        if !rl.CheckCollisionCircleLine(center^, f32(PLAYER_RADIUS) + wall.thickness/2, wall.p1, wall.p2) do continue
+        if !rl.CheckCollisionCircleLine(center^, PLAYER_RADIUS + wall.thickness/2, wall.p1, wall.p2) do continue
 
         closest, dist := WallClosestPoint(wall, center^)
-        minDist := f32(PLAYER_RADIUS) + wall.thickness / 2
+        minDist := PLAYER_RADIUS + wall.thickness / 2
 
         if dist > 0
         {
-            nx := (center.x - closest.x) / dist
-            ny := (center.y - closest.y) / dist
-            center.x += nx * (minDist - dist)
-            center.y += ny * (minDist - dist)
+            n := (center^ - closest) / dist
+            center^ += n * (minDist - dist)
         }
         else
         {
-            dx := wall.p2.x - wall.p1.x
-            dy := wall.p2.y - wall.p1.y
-            l  := math.sqrt(dx*dx + dy*dy)
-            center.x += (-dy / l) * minDist
-            center.y += ( dx / l) * minDist
+            d := wall.p2 - wall.p1
+            l  := math.sqrt(d.x*d.x + d.y*d.y)
+            center^ += {( d.x / l) * minDist, (-d.y / l) * minDist}
         }
     }
 }
 
-LoadMap :: proc(path: string, stateAllocator: ^StateAllocator) -> ^State 
+LoadMap :: proc(path: string, stateAllocator: ^StateAllocator) -> (state: ^State, ok: bool)
 {
     data, err := os.read_entire_file_from_path(path, context.allocator)
-    if err != nil do return nil
+    if err != nil do return
     defer delete(data)
 
     config: MapConfig
-    if err := json.unmarshal(data, &config); err != nil do return nil
+    if json.unmarshal(data, &config) != nil do return
 
-    alloc := mem.arena_allocator(&stateAllocator.arena)
-    state := new(State, alloc)
+    alloc  := mem.arena_allocator(&stateAllocator.arena)
+    state   = new(State, alloc)
 
     state.playerPosition = {400, 300}
-    state.playerSpeed    = f32(config.player_speed)
-    state.wallThickness  = config.wall_thickness
+    state.playerSpeed    = Speed(config.player_speed)
+    state.wallThickness  = Thickness(config.wall_thickness)
     state.spawners       = make([dynamic]Spawner, 0, len(config.bullet_spawners), alloc)
     state.walls          = make([dynamic]Wall, 0, 4, alloc)
-    state.mapWidth  = f32(config.map_width)
-    state.mapHeight = f32(config.map_height)
+    state.mapSize        = {Dimension(config.map_width), Dimension(config.map_height)}
 
-    for s in config.bullet_spawners {
-
+    for s in config.bullet_spawners
+    {
         type := BulletType.BOUNCER
         if s.bullet_type == "constructor" do type = .CONSTRUCTOR
-        if s.bullet_type == "bulldozer" do type = .BULLDOZER
+        if s.bullet_type == "bulldozer"   do type = .BULLDOZER
 
-        append(&state.spawners, Spawner{position = {f32(s.x), f32(s.y)}, spawnFrequency = s.spawn_frequency, speed = f32(s.velocity), bulletType = type})
+        append(&state.spawners, Spawner{
+            position       = {Coordinate(s.x), Coordinate(s.y)},
+            spawnFrequency = s.spawn_frequency,
+            speed          = Speed(s.velocity),
+            bulletType     = type,
+        })
     }
 
-    t := f32(config.wall_thickness)
-    w := f32(config.map_width)
-    h := f32(config.map_height)
+    t := Thickness(config.wall_thickness)
+    w := Dimension(config.map_width)
+    h := Dimension(config.map_height)
 
-    append(&state.walls, Wall{ p1 = {0, 0}, p2 = {w, 0}, thickness = t, invulnerable = true }) // top
-    append(&state.walls, Wall{ p1 = {0, h}, p2 = {w, h}, thickness = t, invulnerable = true }) // bottom
-    append(&state.walls, Wall{ p1 = {0, 0}, p2 = {0, h}, thickness = t, invulnerable = true }) // left
-    append(&state.walls, Wall{ p1 = {w, 0}, p2 = {w, h}, thickness = t, invulnerable = true }) // right
+    append(&state.walls, Wall{ p1 = {0, 0}, p2 = {w, 0}, thickness = t, invulnerable = true })
+    append(&state.walls, Wall{ p1 = {0, h}, p2 = {w, h}, thickness = t, invulnerable = true })
+    append(&state.walls, Wall{ p1 = {0, 0}, p2 = {0, h}, thickness = t, invulnerable = true })
+    append(&state.walls, Wall{ p1 = {w, 0}, p2 = {w, h}, thickness = t, invulnerable = true })
 
-    for w in config.walls {
-        append(&state.walls, Wall{ p1 = {f32(w.x1), f32(w.y1)}, p2 = {f32(w.x2), f32(w.y2)}, thickness = t, invulnerable = w.invulnerable })
+    for wall in config.walls
+    {
+        append(&state.walls, Wall{
+            p1           = {Coordinate(wall.x1), Coordinate(wall.y1)},
+            p2           = {Coordinate(wall.x2), Coordinate(wall.y2)},
+            thickness    = t,
+            invulnerable = wall.invulnerable,
+        })
     }
 
-    return state
+    ok = true
+    return
 }
 
 HandleInput :: proc(state: ^State)
@@ -245,14 +263,13 @@ SpawnConstructorWall :: proc(state: ^State, impact: rl.Vector2, velocity: rl.Vec
     speed := math.sqrt(velocity.x*velocity.x + velocity.y*velocity.y)
     if speed == 0 do return
 
-    perp_x := -velocity.y / speed
-    perp_y :=  velocity.x / speed
+    perp := rl.Vector2{-velocity.y, velocity.x} / speed
 
     half := CONSTRUCTOR_WALL_LENGTH / 2
-    p1   := rl.Vector2{impact.x - perp_x * half, impact.y - perp_y * half}
-    p2   := rl.Vector2{impact.x + perp_x * half, impact.y + perp_y * half}
+    p1   := rl.Vector2{impact.x - perp.x * half, impact.y - perp.y * half}
+    p2   := rl.Vector2{impact.x + perp.x * half, impact.y + perp.y * half}
 
-    append(&state.walls, Wall{p1 = p1, p2 = p2, thickness = f32(state.wallThickness), invulnerable = false})
+    append(&state.walls, Wall{p1 = p1, p2 = p2, thickness = state.wallThickness, invulnerable = false})
 }
 
 UpdateBullets :: proc(state: ^State)
@@ -306,36 +323,29 @@ BounceOffWall :: proc(bullet: ^Bullet, wall: Wall)
 
     if dist > 0
     {
-        nx := (bullet.position.x - closest.x) / dist
-        ny := (bullet.position.y - closest.y) / dist
-        bullet.position.x += nx * (minDist - dist)
-        bullet.position.y += ny * (minDist - dist)
-        dot := bullet.velocity.x*nx + bullet.velocity.y*ny
-        bullet.velocity.x -= 2 * dot * nx
-        bullet.velocity.y -= 2 * dot * ny
+        n := (bullet.position - closest) / dist
+        bullet.position += n * (minDist - dist)
+        dot := bullet.velocity.x*n.x + bullet.velocity.y*n.y
+        bullet.velocity -= 2 * dot * n
     }
     else
     {
-        dx := wall.p2.x - wall.p1.x
-        dy := wall.p2.y - wall.p1.y
-        l  := math.sqrt(dx*dx + dy*dy)
-        nx := -dy / l
-        ny :=  dx / l
-        bullet.position.x += nx * minDist
-        bullet.position.y += ny * minDist
-        dot := bullet.velocity.x*nx + bullet.velocity.y*ny
-        bullet.velocity.x -= 2 * dot * nx
-        bullet.velocity.y -= 2 * dot * ny
+        d := wall.p2 - wall.p1
+        l  := math.sqrt(d.x*d.x + d.y*d.y)
+        n := rl.Vector2{-d.y / l, d.x / l}
+        bullet.position += n * minDist
+        dot := bullet.velocity.x*n.x + bullet.velocity.y*n.y
+        bullet.velocity -= 2 * dot * n
     }
 }
 
 Draw :: proc(state : ^State)
 {
-    screenWidth := f32(rl.GetScreenWidth())
-    screenHeight := f32(rl.GetScreenHeight())
+    screenWidth := Coordinate(rl.GetScreenWidth())
+    screenHeight := Coordinate(rl.GetScreenHeight())
 
     camera := rl.Camera2D{
-        offset   = {(screenWidth - state.mapWidth) / 2, (screenHeight - state.mapHeight) / 2},
+        offset   = {(screenWidth - state.mapSize.x) / 2, (screenHeight - state.mapSize.y) / 2},
         target   = {0, 0},
         rotation = 0,
         zoom     = 1,
@@ -386,10 +396,10 @@ DrawHUD :: proc(state: ^State)
         fmt.tprintf("Time survived: %02d:%02d", minutes, seconds),
     }
 
-    x     :: i32(10)
-    y     :: i32(10)
-    size  :: i32(24)
-    gap   :: i32(32)
+    x     :: 10
+    y     :: 10
+    size  :: 24
+    gap   :: 32
 
     for line, i in lines
     {
@@ -448,33 +458,33 @@ DrawGameOver :: proc(state: ^State)
     rl.ClearBackground(rl.BLACK)
 
     title  : cstring = "YOU DIED"
-    titleSize :: i32(72)
+    titleSize :: 72
     titleWidth := rl.MeasureText(title, titleSize)
     rl.DrawText(title, (screenWidth - titleWidth) / 2, screenHeight / 3, titleSize, rl.RED)
 
     survived := strings.clone_to_cstring(fmt.tprintf("Time survived: %02d:%02d", minutes, seconds), context.temp_allocator)
-    survivedSize :: i32(32)
+    survivedSize :: 32
     survivedWidth := rl.MeasureText(survived, survivedSize)
     rl.DrawText(survived, (screenWidth - survivedWidth) / 2, screenHeight / 3 + 100, survivedSize, rl.WHITE)
 
     hint  : cstring = "Press ENTER to return to menu"
-    hintSize :: i32(20)
+    hintSize :: 20
     hintWidth := rl.MeasureText(hint, hintSize)
     rl.DrawText(hint, (screenWidth - hintWidth) / 2, screenHeight / 3 + 160, hintSize, rl.DARKGRAY)
 
     rl.EndDrawing()
 }
 
-LoadMapFileList :: proc(allocator: mem.Allocator) -> [dynamic]string
+LoadMapFileList :: proc(allocator: mem.Allocator) -> (files: [dynamic]string, ok: bool)
 {
-    files := make([dynamic]string, allocator)
+    files = make([dynamic]string, allocator)
 
     handle, err := os.open("Maps")
-    if err != nil do return files
+    if err != nil do return
+
     defer os.close(handle)
 
     infos, _ := os.read_dir(handle, -1, context.temp_allocator)
-
     for info in infos
     {
         if filepath.ext(info.name) == ".json"
@@ -483,36 +493,37 @@ LoadMapFileList :: proc(allocator: mem.Allocator) -> [dynamic]string
         }
     }
 
-    return files
+    ok = true
+    return
 }
 
 MenuStateInit :: proc(menuState: ^MenuState)
 {
-    menuState.mapFiles  = LoadMapFileList(context.allocator)
-    menuState.itemsText = BuildItemsText(menuState.mapFiles)
+    menuState.buffer = make([]byte, MENU_ARENA_SIZE)
+    mem.arena_init(&menuState.arena, menuState.buffer)
+    RefreshMapList(menuState)
 }
 
 MenuStateFree :: proc(menuState: ^MenuState)
 {
-    for f in menuState.mapFiles do delete(f)
-    delete(menuState.mapFiles)
-    delete(menuState.itemsText)
+    delete(menuState.buffer)
 }
 
-BuildItemsText :: proc(files: [dynamic]string) -> string
+BuildItemsText :: proc(files: [dynamic]string, allocator: mem.Allocator) -> string
 {
     names := make([dynamic]string, context.temp_allocator)
     for f in files do append(&names, filepath.base(f))
-    return strings.join(names[:], ";", context.allocator)
+    return strings.join(names[:], ";", allocator)
 }
 
-RefreshMapList :: proc(menuState: ^MenuState)
+RefreshMapList :: proc(menuState: ^MenuState) -> bool
 {
-    for f in menuState.mapFiles do delete(f)
-    clear(&menuState.mapFiles)
-    delete(menuState.itemsText)
-    menuState.mapFiles  = LoadMapFileList(context.allocator)
-    menuState.itemsText = BuildItemsText(menuState.mapFiles)
+    mem.arena_free_all(&menuState.arena)
+    alloc := mem.arena_allocator(&menuState.arena)
+
+    menuState.mapFiles  = LoadMapFileList(alloc) or_return
+    menuState.itemsText = BuildItemsText(menuState.mapFiles, alloc)
+    return true
 }
 
 main :: proc()
@@ -541,8 +552,12 @@ main :: proc()
                 if DrawMainMenu(&gameState)
                 {
                     mem.arena_free_all(&gameState.stateAllocator.arena)
-                    gameState.state  = LoadMap(gameState.menu.mapFiles[gameState.menu.selected], &gameState.stateAllocator)
-                    gameState.screen = .IN_GAME
+                    state, ok := LoadMap(gameState.menu.mapFiles[gameState.menu.selected], &gameState.stateAllocator)
+                    if ok
+                    {
+                        gameState.state  = state
+                        gameState.screen = .IN_GAME
+                    }
                 }
 
             case .IN_GAME:
